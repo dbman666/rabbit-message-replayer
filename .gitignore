@@ -1,0 +1,6 @@
+*.rdq
+*.idx
+.vs/
+obj/
+bin/
+*.user
