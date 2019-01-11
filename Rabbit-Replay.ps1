@@ -10,12 +10,12 @@ function Find-RabbitMessages() {
         [string] $OutFiles
     )
 
-    $command = "rabbit-message-replayer --output Json --folder $Folder --pattern {0} --threads=$Threads" -f ($Patterns -join ';')
+    $command = "rabbit-message-replayer --output Json --folder $Folder --pattern '{0}' --threads=$Threads" -f ($Patterns -join ';')
     $result = (Invoke-Expression $command | ConvertFrom-Json).SyncRoot
     $result = @{
-        Files = $result.Files | Sort-Object -Descending Count
-        Queues = $result.Queues | Sort-Object -Descending Count
-        Types = $result.Files | Sort-Object -Descending Count
+        Files = $result.Files | Sort-Object -Descending Count | Add-Member Type Files -PassThru
+        Queues = $result.Queues | Sort-Object -Descending Count | Add-Member Type Queues -PassThru
+        Types = $result.Types | Sort-Object -Descending Count | Add-Member Type Types -PassThru
     }
 
     $result.Queues | ForEach-Object { $_.PSObject.TypeNames.Insert(0, "Rabbit.Stat") }
@@ -27,5 +27,6 @@ function Find-RabbitMessages() {
     if ($OutTypes) { Set-Variable -scope 1 -Name $OutTypes -Value $result.Types }
     if ($OutFiles) { Set-Variable -scope 1 -Name $OutFiles -Value $result.Files }
     Set-Variable -scope 1 -Name RabbitMessages -Value $result
-    $result.Queues
+
+    $result.Files + $result.Queues + $result.Types
 }
