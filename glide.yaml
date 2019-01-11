@@ -1,0 +1,12 @@
+package: .
+import:
+- package: github.com/coveo/gotemplate
+  version: 1213ee7e12b804043ac7e571713037aca4d38e72
+  subpackages:
+  - collections
+  - errors
+  - utils
+- package: github.com/fatih/color
+- package: gopkg.in/alecthomas/kingpin.v2
+- package: github.com/olekukonko/tablewriter
+  version: ^0.0.1
