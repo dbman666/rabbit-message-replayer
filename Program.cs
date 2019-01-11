@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using RabbitMQ.Client;
+using System.Diagnostics;
 
 
 namespace rabbit
@@ -49,36 +50,34 @@ namespace rabbit
             //    Console.WriteLine(file);
 
             if (string.IsNullOrWhiteSpace(rabbitUrl)) {
-                Console.WriteLine($"Missing RABBIT_URL env var. Ex: 'amqp://queueserver.prod.cloud.coveo.com:5672'");
+                Console.Error.WriteLine($"Missing RABBIT_URL env var. Ex: 'amqp://queueserver.prod.cloud.coveo.com:5672'");
                 return PrintHelp();
             }
             if (string.IsNullOrWhiteSpace(rabbitUser)) {
-                Console.WriteLine($"Missing RABBIT_USER env var. Ex: 'svc_rabbit_2'");
+                Console.Error.WriteLine($"Missing RABBIT_USER env var. Ex: 'svc_rabbit_2'");
                 return PrintHelp();
             }
             if (string.IsNullOrWhiteSpace(rabbitPassword)) {
-                Console.WriteLine($"Missing RABBIT_PASSWORD env var. Ex: '@donutLover2'");
+                Console.Error.WriteLine($"Missing RABBIT_PASSWORD env var. Ex: '@donutLover2'");
                 return PrintHelp();
             }
 
 
             var files = Directory.EnumerateFiles(folder, wildcard).ToList();
-			foreach (var f in files)
-				Console.WriteLine(f);
             var globalStats = new GlobalStats();
-            Console.WriteLine($"{files.Count} files to process.");
+            Console.Error.WriteLine($"{files.Count} files to process.");
 
             if (hasApply) {
                 var iFile = 0;
                 var iMsg = 0;
-                var connectionFactory = new ConnectionFactory {Uri = new Uri(rabbitUrl), UserName = rabbitUser, Password = rabbitPassword, AutomaticRecoveryEnabled = true, RequestedHeartbeat = 30, SocketWriteTimeout = 300000};
+                var connectionFactory = new ConnectionFactory { Uri = new Uri(rabbitUrl), UserName = rabbitUser, Password = rabbitPassword, AutomaticRecoveryEnabled = true, RequestedHeartbeat = 30, SocketWriteTimeout = 300000 };
                 using (var connection = connectionFactory.CreateConnection())
                 using (var channel = connection.CreateModel()) {
                     var propsPersistent = channel.CreateBasicProperties();
                     propsPersistent.DeliveryMode = 2;
 
                     foreach (var file in files) {
-                        Console.WriteLine($"{iFile}/{files.Count}: {file}");
+                        Console.Error.WriteLine($"{iFile}/{files.Count}: {file}");
                         var isRdqFile = file.EndsWith(".rdq");
                         var fileAsBytes = File.ReadAllBytes(file);
 
@@ -116,7 +115,7 @@ namespace rabbit
             } else {
                 var iFile = 0;
                 foreach (var file in files) {
-                    Console.WriteLine($"{iFile}/{files.Count}: {file}");
+                    Console.Error.WriteLine($"{iFile}/{files.Count}: {file}");
                     var isRdqFile = file.EndsWith(".rdq");
                     var fileAsBytes = File.ReadAllBytes(file);
 
@@ -224,12 +223,10 @@ Expected env vars:
                     msg.IsPush = true;
                     msg.Queue = ExtractPushQueueName(fileAsBytes, msgPos / nbCharsInHex);
                 }
-
                 yield return msg;
 
-                posLen += msgLen;
                 if (p_UseMsgLen && fileAsBytes[posLen] != 0xFF) Console.WriteLine("bad marker");
-                ++posLen;
+                posLen = posData + 1;
             }
         }
 
