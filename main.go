@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"runtime/debug"
@@ -134,21 +135,17 @@ func main() {
 	close(jobs)
 
 	// Wait for results
-	var queueStat, typeStat, fileStat Statistics
+	var queueStat, qtStat, fileStat, ftStat Statistics
 	for range files {
 		file := <-results
 		if *verbose {
 			errPrintf("%s %d messages %d bytes\n", file.Name(), file.Count(), file.Size())
 		}
 
-		for _, qs := range file.Queues.List {
-			queueStat.AddValues(qs.Name, qs.Count(), qs.Sum())
-		}
-		for _, ts := range file.Types.List {
-			typeStat.AddValues(ts.Name, ts.Count(), ts.Sum())
-		}
+		queueStat.Join(file.Queues)
 		if file.Count() > 0 {
-			fileStat.AddValues(file.Name(), file.Count(), file.Size())
+			fileStat.AddStatistic(file.Stat)
+			ftStat.AddGroup(file.Type(), file.Stat)
 		}
 
 		if *replay {
@@ -156,6 +153,9 @@ func main() {
 				publish <- msg
 			}
 		}
+	}
+	for _, qs := range queueStat.List {
+		qtStat.AddGroup(strings.TrimPrefix(filepath.Ext(qs.Name), "."), *qs)
 	}
 
 	if mode := *output; mode != "" {
@@ -171,36 +171,51 @@ func main() {
 			collections.DictionaryHelper = json.DictionaryHelper
 		}
 		print(collections.AsList(map[string]interface{}{
-			"Files":  fileStat.GetStats(),
-			"Queues": queueStat.GetStats(),
-			"Types":  typeStat.GetStats(),
+			"Files":      fileStat.GetStats(),
+			"FileTypes":  ftStat.GetStats(),
+			"Queues":     queueStat.GetStats(),
+			"QueueTypes": qtStat.GetStats(),
 		}).PrettyPrint())
 	} else {
-		printTable := func(title string, stat Statistics) {
+		printTable := func(title string, listStat Statistics, group bool) {
+			columns := collections.NewList(title, "Count", "Messages", "Size", "Average", "Minimum", "Maximum")
+			if !group {
+				columns = columns.Remove(1)
+			}
+
 			table := tablewriter.NewWriter(os.Stdout)
-			columns := []string{title, "Count", "Total Size", "Average"}
 			table.SetBorder(false)
 			table.SetRowSeparator("-")
 			table.SetColumnSeparator(" ")
 			table.SetCenterSeparator(" ")
-			table.SetHeader(columns)
-			count := 0
-			size := 0
-			for _, s := range stat.List {
-				table.Append([]string{s.Name, fmt.Sprint(s.Count()), fmt.Sprint(s.Sum()), fmt.Sprintf("%.1f", s.Average())})
-				count += s.Count()
-				size += s.Sum()
+			table.SetHeader(columns.Strings())
+			table.SetFooterAlignment(tablewriter.ALIGN_RIGHT)
+
+			var stat Statistic
+			for _, s := range listStat.List {
+				data := collections.NewList(s.Name, s.Count(), s.Messages(), int64(s.Sum()), int64(s.Average()), int64(s.Minimum()), int64(s.Maximum()))
+				if !group {
+					data = data.Remove(1)
+				}
+				table.Append(data.Strings())
+				stat.Join(*s)
 			}
-			if len(stat.List) > 1 {
-				table.SetFooter([]string{fmt.Sprint(len(stat.List)), fmt.Sprint(count), fmt.Sprint(size), fmt.Sprintf("%.1f", float64(size)/float64(count))})
+			if len(listStat.List) > 1 {
+				s := stat
+				data := collections.NewList(len(listStat.List), s.Count(), s.Messages(), int64(s.Sum()), int64(s.Average()), int64(s.Minimum()), int64(s.Maximum()))
+				if !group {
+					data = data.Remove(1)
+				}
+				table.SetFooter(data.Strings())
 			}
 			table.Render()
 			fmt.Println()
 		}
 
-		printTable("Files", fileStat)
-		printTable("Queues", queueStat)
-		printTable("Types", typeStat)
+		printTable("Files", fileStat, false)
+		printTable("Queues", queueStat, false)
+		printTable("Queue Types", qtStat, true)
+		printTable("File Types", ftStat, true)
 	}
 }
 
@@ -233,11 +248,18 @@ func messageHandler(id int, url string, messages <-chan *RabbitMessage, declareQ
 		if declareQueues {
 			must(ch.QueueDeclare(msg.Queue, true, false, false, false, nil))
 		}
-		//fmt.Println("Publishing to", msg.Queue, msg.Position, msg.Length)
-		must(ch.Publish("", msg.Queue, true, false, amqp.Publishing{
+
+		pub := amqp.Publishing{
 			DeliveryMode: amqp.Persistent,
 			Body:         msg.Data,
-		}))
-		//time.Sleep(1 * time.Millisecond)
+		}
+
+		if msg.IsPush() {
+			pub.Headers = map[string]interface{}{
+				"cmf": fmt.Sprintf("{url:%s,method:Process,zip:true}", msg.Queue),
+			}
+		}
+
+		must(ch.Publish("", msg.Queue, true, false, pub))
 	}
 }

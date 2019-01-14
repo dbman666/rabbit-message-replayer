@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"path/filepath"
 )
 
 // RabbitMessage represents a message that must be stored into RabbitMQ
@@ -15,9 +14,6 @@ type RabbitMessage struct {
 
 // IsPush determines if the current messsage comes from PushAPI (Coveo related)
 func (msg *RabbitMessage) IsPush() bool { return msg.Data[0] != 'i' }
-
-// Type returns the type of the queue
-func (msg *RabbitMessage) Type() string { return filepath.Ext(msg.Queue) }
 
 // GetQueueName retrieve the name of the queue that should be used
 func (msg *RabbitMessage) GetQueueName(data []byte) (string, error) {
