@@ -215,7 +215,7 @@ Expected env vars:
                 }
 
                 var msgBytes = allBlobs.ToArray();
-                var msg = new Msg { Bytes = msgBytes, PosLen = posLen, MsgLen = msgLen };
+                var msg = new Msg { Bytes = msgBytes, PosLen = posLen, MsgLen = msgBytes.Count() };
 
                 if (msgBytes[0] == 'i') {
                     msg.Queue = ExtractQueueName(fileAsBytes, fileAsHexChars, msgPos);
@@ -225,8 +225,12 @@ Expected env vars:
                 }
                 yield return msg;
 
-                if (p_UseMsgLen && fileAsBytes[posLen] != 0xFF) Console.WriteLine("bad marker");
-                posLen = posData + 1;
+                if (p_UseMsgLen) {
+                    posLen += msgLen;
+                    if (fileAsBytes[posLen++] != 0xFF) Console.WriteLine("bad marker");
+                } else {
+                    posLen = posData + 1;
+                }
             }
         }
 
