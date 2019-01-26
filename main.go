@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"path"
@@ -40,12 +42,13 @@ A tool to reinject orphaned messages into RabbitMQ following a persistent_store 
 `
 
 var (
-	print     = utils.ColorPrint
-	printf    = utils.ColorPrintf
-	println   = utils.ColorPrintln
-	errPrintf = utils.ColorErrorPrintf
-	must      = errors.Must
-	iif       = collections.IIf
+	print      = utils.ColorPrint
+	printf     = utils.ColorPrintf
+	println    = utils.ColorPrintln
+	errPrintf  = utils.ColorErrorPrintf
+	errPrintln = utils.ColorErrorPrintln
+	must       = errors.Must
+	iif        = collections.IIf
 )
 
 func main() {
@@ -61,30 +64,32 @@ func main() {
 	}()
 
 	var (
-		app    = kingpin.New(os.Args[0], description)
-		folder = app.Flag("folder", "Folder where to find messages.").Short('f').ExistingDir()
+		app              = kingpin.New(os.Args[0], description)
+		folder           = app.Flag("folder", "Folder where to find messages.").Short('f').ExistingDir()
+		rabbitURL        = app.Flag("rabbit-host", "The RabbitMQ Url. Env="+rabbitHost).Short('H').Envar(rabbitHost).String()
+		rabbitPrototocol = app.Flag("protocol", "The RabbitMQ protocol.").Default("amqp").String()
+		rabbitPort       = app.Flag("port", "The RabbitMQ port.").Default("5672").Int()
+		user             = app.Flag("user", "User used to connect to RabbitMQ. Env="+rabbitUser).Short('u').Default("guest").Envar(rabbitUser).String()
+		password         = app.Flag("password", "Password used to connect to RabbitMQ. Env="+rabbitPassword).Default("guest").Envar(rabbitPassword).String()
+		declareQueue     = app.Flag("declare-queues", "Force queue creation if it does not exist").Bool()
 
 		findLostCommand = app.Command("find-lost", "Finds lost messages given a list of queues and how many messages they have lost")
-		lostMessages    = findLostCommand.Flag("lost-messages", "Map of lost messages by queue").Required().ExistingFile()
-		outputFolder    = findLostCommand.Flag("output-folder", "Where queue data should be exported").Required().String()
+		lostMessages    = findLostCommand.Flag("lost-messages", "Map of lost messages by queue").Required().PlaceHolder("JSONFile").ExistingFile()
+		outputFolder    = findLostCommand.Flag("output-folder", "Where queue data should be exported").Required().PlaceHolder("folder").String()
 
-		fullCommand      = app.Command("full", "stuff")
-		forceColor       = fullCommand.Flag("color", "Force rendering of colors event if output is redirected.").Bool()
-		forceNoColor     = fullCommand.Flag("no-color", "Force rendering of colors event if output is redirected.").Bool()
-		verbose          = fullCommand.Flag("verbose", "Indicate to add traces during processing").Short('V').Bool()
-		getVersion       = fullCommand.Flag("version", "Get the current version of gotemplate.").Short('v').Bool()
-		rabbitURL        = fullCommand.Flag("rabbit-host", "The RabbitMQ Url. Env="+rabbitHost).Short('H').Envar(rabbitHost).String()
-		rabbitPrototocol = fullCommand.Flag("protocol", "The RabbitMQ protocol.").Default("amqp").String()
-		rabbitPort       = fullCommand.Flag("port", "The RabbitMQ port.").Default("5672").Int()
-		user             = fullCommand.Flag("user", "User used to connect to RabbitMQ. Env="+rabbitUser).Short('u').Default("guest").Envar(rabbitUser).String()
-		password         = fullCommand.Flag("password", "Password used to connect to RabbitMQ. Env="+rabbitPassword).Default("guest").Envar(rabbitPassword).String()
-		replay           = fullCommand.Flag("replay", "Actually replay the messages to the target Rabbit cluster.").Short('r').Bool()
-		maxDepth         = fullCommand.Flag("max-depth", "Maximum depth to find.").Default("5").Int()
-		patterns         = fullCommand.Flag("pattern", "Pattern used to find persistent store or index files.").Short('p').Default("*.rdq", "*.idx").Strings()
-		threads          = fullCommand.Flag("threads", "Number of parallel threads running.").Short('t').Default(fmt.Sprint((runtime.NumCPU() + 1) / 2)).Int()
-		output           = fullCommand.Flag("output", "Specify the output type (Json, Yaml, Hcl)").Short('o').Enum("Hcl", "h", "hcl", "H", "HCL", "Json", "j", "json", "J", "JSON", "Yaml", "Yml", "y", "yml", "yaml", "Y", "YML", "YAML")
-		declareQueue     = fullCommand.Flag("declare-queues", "Force queue creation if it does not exist").Bool()
-		match            = fullCommand.Flag("match", "Regular expression for matching queues").Short('m').PlaceHolder("regexp").String()
+		replayCommand = app.Command("replay", "Replay messages that have been extracted by find-lost command")
+
+		fullCommand  = app.Command("full", "Parse all files recursively in the source folder to find messages")
+		forceColor   = fullCommand.Flag("color", "Force rendering of colors event if output is redirected.").Bool()
+		forceNoColor = fullCommand.Flag("no-color", "Force rendering of colors event if output is redirected.").Bool()
+		verbose      = fullCommand.Flag("verbose", "Indicate to add traces during processing").Short('V').Bool()
+		getVersion   = fullCommand.Flag("version", "Get the current version of gotemplate.").Short('v').Bool()
+		replay       = fullCommand.Flag("replay", "Actually replay the messages to the target Rabbit cluster.").Short('r').Bool()
+		maxDepth     = fullCommand.Flag("max-depth", "Maximum depth to find.").Default("5").Int()
+		patterns     = fullCommand.Flag("pattern", "Pattern used to find persistent store or index files.").Short('p').Default("*.rdq", "*.idx").Strings()
+		threads      = fullCommand.Flag("threads", "Number of parallel threads running.").Short('t').Default(fmt.Sprint((runtime.NumCPU() + 1) / 2)).Int()
+		output       = fullCommand.Flag("output", "Specify the output type (Json, Yaml, Hcl)").Short('o').Enum("Hcl", "h", "hcl", "H", "HCL", "Json", "j", "json", "J", "JSON", "Yaml", "Yml", "y", "yml", "yaml", "Y", "YML", "YAML")
+		match        = fullCommand.Flag("match", "Regular expression for matching queues").Short('m').PlaceHolder("regexp").String()
 	)
 
 	app.UsageWriter(os.Stdout)
@@ -155,13 +160,10 @@ func main() {
 			data := must(ReadRabbitFile(file, nil)).(RabbitFile)
 			data.ProcessMessages(func(msg *RabbitMessage) {
 				if queueInfo, ok := lostMessagesMap[msg.Queue]; ok && !queueInfo.done {
-					line := "C "
 					if msg.IsPush() {
-						line = "P "
 						queueInfo.pushAPI++
 					}
-					line += base64.StdEncoding.EncodeToString(msg.Data)
-					queueInfo.fileHandler.WriteString(fmt.Sprintln(line))
+					queueInfo.fileHandler.WriteString(fmt.Sprintln(base64.StdEncoding.EncodeToString(msg.Data)))
 					queueInfo.found++
 				}
 			})
@@ -193,6 +195,42 @@ func main() {
 		}
 		data := collections.NewList("", toFind, found, pushAPI, found-pushAPI, found-toFind)
 		table.SetFooter(data.Strings())
+		table.Render()
+		fmt.Println()
+
+	case replayCommand.FullCommand():
+		url := fmt.Sprintf("%s://%s:%s@%s:%d", *rabbitPrototocol, *user, *password, *rabbitURL, *rabbitPort)
+		publish := make(chan *RabbitMessage)
+		completed := make(chan publisherStatus)
+		go messageHandler(0, url, publish, completed, *declareQueue)
+		files := utils.MustFindFilesMaxDepth(*folder, 1, false, "*")
+		for _, fileName := range files {
+			fmt.Println("Processing file", fileName)
+			file := must(os.Open(fileName)).(*os.File)
+			defer file.Close()
+
+			reader := bufio.NewReader(file)
+			for {
+				line, err := reader.ReadString('\n')
+				if err == io.EOF {
+					break
+				}
+				publish <- &RabbitMessage{
+					Queue: filepath.Base(fileName),
+					Data:  must(base64.StdEncoding.DecodeString(line)).([]byte),
+				}
+			}
+		}
+		close(publish)
+		fmt.Println("Waiting for publisher to complete")
+		status := <-completed
+		table := getTable("Queue name", "Published")
+		var total int
+		for queue, published := range status.published {
+			table.Append(collections.NewList(queue, published).Strings())
+			total += published
+		}
+		table.SetFooter(collections.NewList("", total).Strings())
 		table.Render()
 		fmt.Println()
 
@@ -232,6 +270,7 @@ func main() {
 		// Start multithreads processing
 		jobs := make(chan string, *threads)
 		results := make(chan RabbitFile, len(files))
+		completed := make(chan publisherStatus)
 		var publish chan *RabbitMessage
 		if *replay {
 			publish = make(chan *RabbitMessage, *threads*30)
@@ -240,7 +279,7 @@ func main() {
 			go fileHandler(i, jobs, results, re)
 
 			if *replay {
-				go messageHandler(i, url, publish, *declareQueue)
+				go messageHandler(i, url, publish, completed, *declareQueue)
 			}
 		}
 
@@ -249,6 +288,12 @@ func main() {
 			jobs <- file
 		}
 		close(jobs)
+
+		if *replay {
+			for i := 0; i < *threads; i++ {
+				<-completed
+			}
+		}
 
 		// Wait for results
 		var queueStat, qtStat, fileStat, ftStat Statistics
@@ -342,7 +387,12 @@ func fileHandler(id int, jobs <-chan string, result chan<- RabbitFile, reMatch *
 	}
 }
 
-func messageHandler(id int, url string, messages <-chan *RabbitMessage, declareQueues bool) {
+type publisherStatus struct {
+	id        int
+	published map[string]int
+}
+
+func messageHandler(id int, url string, messages <-chan *RabbitMessage, completed chan publisherStatus, declareQueues bool) {
 	conn := must(amqp.Dial(url)).(*amqp.Connection)
 	defer conn.Close()
 
@@ -352,7 +402,15 @@ func messageHandler(id int, url string, messages <-chan *RabbitMessage, declareQ
 	go func() {
 		returned := ch.NotifyReturn(make(chan amqp.Return, 1))
 		for r := range returned {
-			fmt.Println("Returned message", r.RoutingKey)
+			errPrintln(color.RedString("Returned message"), r.RoutingKey)
+		}
+	}()
+
+	published := make(map[string]int)
+
+	defer func() {
+		if completed != nil {
+			completed <- publisherStatus{id, published}
 		}
 	}()
 
@@ -373,6 +431,7 @@ func messageHandler(id int, url string, messages <-chan *RabbitMessage, declareQ
 		}
 
 		must(ch.Publish("", msg.Queue, true, false, pub))
+		published[msg.Queue]++
 	}
 }
 
