@@ -131,9 +131,26 @@ func main() {
 			}
 		}
 
+		filesHandled := 0
 		// Find messages and write them to the file
 		for _, file := range files {
 			fmt.Println("Handling file: " + file)
+			filesHandled++
+			if filesHandled%100 == 0 {
+				stillNeedToProcess := false
+				fmt.Println("Verifying if we need to keep going")
+				for queueName, queueInfo := range lostMessagesMap {
+					if queueInfo.found != queueInfo.toFind {
+						fmt.Printf("%s is not completed, still missing %v", queueName, queueInfo.toFind-queueInfo.found)
+						stillNeedToProcess = true
+					}
+				}
+				if !stillNeedToProcess {
+					fmt.Println("Completed!")
+					break
+				}
+			}
+
 			data, err := ReadRabbitFile(file, nil)
 			if err != nil {
 				panic(err)
