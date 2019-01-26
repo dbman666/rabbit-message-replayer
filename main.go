@@ -48,13 +48,6 @@ var (
 	iif       = collections.IIf
 )
 
-type LostMessagesData struct {
-	toFind      int
-	found       int
-	filePath    string
-	fileHandler *os.File
-}
-
 func main() {
 	var exitCode int
 
@@ -118,13 +111,23 @@ func main() {
 
 		// Parse configuration file and create output files (faster to create them all here and delete unneeded ones than check if they are created at runtime)
 		var lostMessagesData []interface{}
-		lostMessagesMap := make(map[string]*LostMessagesData)
+
+		type FindData struct {
+			toFind      int
+			found       int
+			pushAPI     int
+			done        bool
+			filePath    string
+			fileHandler *os.File
+		}
+
+		lostMessagesMap := make(map[string]*FindData)
 		must(collections.ConvertData(string(must(ioutil.ReadFile(*lostMessages)).([]byte)), &lostMessagesData))
 		for _, item := range lostMessagesData {
 			itemAsMap := item.(json.Dictionary)
 			queueName := itemAsMap["name"].(string)
 			filePath := path.Join(*outputFolder, queueName)
-			lostMessagesMap[queueName] = &LostMessagesData{
+			lostMessagesMap[queueName] = &FindData{
 				toFind:      itemAsMap["messages"].(int),
 				filePath:    filePath,
 				fileHandler: must(os.Create(filePath)).(*os.File),
@@ -134,36 +137,36 @@ func main() {
 		filesHandled := 0
 		// Find messages and write them to the file
 		for _, file := range files {
+			stillNeedToProcess := false
+			for queueName, queueInfo := range lostMessagesMap {
+				if queueInfo.found < queueInfo.toFind {
+					stillNeedToProcess = true
+				} else if !queueInfo.done {
+					queueInfo.done = true
+					fmt.Printf(color.GreenString("All messages in %s have been found\n"), queueName)
+				}
+			}
+			if !stillNeedToProcess {
+				break
+			}
 			fmt.Println("Handling file: " + file)
 			filesHandled++
-			if filesHandled%100 == 0 {
-				stillNeedToProcess := false
-				fmt.Println("Verifying if we need to keep going")
-				for queueName, queueInfo := range lostMessagesMap {
-					if queueInfo.found != queueInfo.toFind {
-						fmt.Printf("%s is not completed, still missing %v", queueName, queueInfo.toFind-queueInfo.found)
-						stillNeedToProcess = true
-					}
-				}
-				if !stillNeedToProcess {
-					fmt.Println("Completed!")
-					break
-				}
-			}
 
-			data, err := ReadRabbitFile(file, nil)
-			if err != nil {
-				panic(err)
-			}
+			data := must(ReadRabbitFile(file, nil)).(RabbitFile)
 			data.ProcessMessages(func(msg *RabbitMessage) {
-				queueInfo, ok := lostMessagesMap[msg.Queue]
-				if !ok || queueInfo.found == queueInfo.toFind {
-					return
+				if queueInfo, ok := lostMessagesMap[msg.Queue]; ok && !queueInfo.done {
+					line := "C "
+					if msg.IsPush() {
+						line = "P "
+						queueInfo.pushAPI++
+					}
+					line += base64.StdEncoding.EncodeToString(msg.Data)
+					queueInfo.fileHandler.WriteString(fmt.Sprintln(line))
+					queueInfo.found++
 				}
-				queueInfo.fileHandler.WriteString(fmt.Sprintln(base64.StdEncoding.EncodeToString(msg.Data)))
-				queueInfo.found++
 			})
 		}
+		fmt.Println("Completed!")
 
 		keys := []string{}
 		for queueName := range lostMessagesMap {
@@ -171,15 +174,27 @@ func main() {
 		}
 		sort.Strings(keys)
 
+		table := getTable("Queue name", "To find", "Found", "PushAPI", "Crawlers", "Missing/Over")
+
 		// Output result and delete unneeded output files (empty)
+		var toFind, found, pushAPI int
 		for _, queueName := range keys {
 			queueInfo := lostMessagesMap[queueName]
 			must(queueInfo.fileHandler.Close())
-			fmt.Printf("%s, Remaining messages: %v\n", queueName, queueInfo.toFind-queueInfo.found)
+			data := collections.NewList(queueName, queueInfo.toFind, queueInfo.found, queueInfo.pushAPI, queueInfo.found-queueInfo.pushAPI, queueInfo.found-queueInfo.toFind)
+
+			toFind += queueInfo.toFind
+			found += queueInfo.found
+			pushAPI += queueInfo.pushAPI
+			table.Append(data.Strings())
 			if queueInfo.found == 0 {
 				must(os.Remove(queueInfo.filePath))
 			}
 		}
+		data := collections.NewList("", toFind, found, pushAPI, found-pushAPI, found-toFind)
+		table.SetFooter(data.Strings())
+		table.Render()
+		fmt.Println()
 
 	case fullCommand.FullCommand():
 		var patternList []string
@@ -284,13 +299,7 @@ func main() {
 					columns = columns.Remove(1)
 				}
 
-				table := tablewriter.NewWriter(os.Stdout)
-				table.SetBorder(false)
-				table.SetRowSeparator("-")
-				table.SetColumnSeparator(" ")
-				table.SetCenterSeparator(" ")
-				table.SetHeader(columns.Strings())
-				table.SetFooterAlignment(tablewriter.ALIGN_RIGHT)
+				table := getTable(columns.Strings()...)
 
 				var stat Statistic
 				for _, s := range listStat.List {
@@ -365,4 +374,15 @@ func messageHandler(id int, url string, messages <-chan *RabbitMessage, declareQ
 
 		must(ch.Publish("", msg.Queue, true, false, pub))
 	}
+}
+
+func getTable(columns ...string) *tablewriter.Table {
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetBorder(false)
+	table.SetRowSeparator("-")
+	table.SetColumnSeparator(" ")
+	table.SetCenterSeparator(" ")
+	table.SetHeader(columns)
+	table.SetFooterAlignment(tablewriter.ALIGN_RIGHT)
+	return table
 }
