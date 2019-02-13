@@ -72,6 +72,7 @@ func main() {
 		user             = app.Flag("user", "User used to connect to RabbitMQ. Env="+rabbitUser).Short('u').Default("guest").Envar(rabbitUser).String()
 		password         = app.Flag("password", "Password used to connect to RabbitMQ. Env="+rabbitPassword).Default("guest").Envar(rabbitPassword).String()
 		declareQueue     = app.Flag("declare-queues", "Force queue creation if it does not exist").Bool()
+		isExchange       = app.Flag("is-exchange", "Set to true if the queue names are actually exchanges").Bool()
 
 		findLostCommand = app.Command("find-lost", "Finds lost messages given a list of queues and how many messages they have lost")
 		lostMessages    = findLostCommand.Flag("lost-messages", "Map of lost messages by queue").Required().PlaceHolder("JSONFile").ExistingFile()
@@ -202,7 +203,7 @@ func main() {
 		url := fmt.Sprintf("%s://%s:%s@%s:%d", *rabbitPrototocol, *user, *password, *rabbitURL, *rabbitPort)
 		publish := make(chan *RabbitMessage)
 		completed := make(chan publisherStatus)
-		go messageHandler(0, url, publish, completed, *declareQueue)
+		go messageHandler(0, url, publish, completed, *declareQueue, *isExchange)
 		files := utils.MustFindFilesMaxDepth(*folder, 1, false, "*")
 		for _, fileName := range files {
 			fmt.Println("Processing file", fileName)
@@ -279,7 +280,7 @@ func main() {
 			go fileHandler(i, jobs, results, re)
 
 			if *replay {
-				go messageHandler(i, url, publish, completed, *declareQueue)
+				go messageHandler(i, url, publish, completed, *declareQueue, *isExchange)
 			}
 		}
 
@@ -288,12 +289,6 @@ func main() {
 			jobs <- file
 		}
 		close(jobs)
-
-		if *replay {
-			for i := 0; i < *threads; i++ {
-				<-completed
-			}
-		}
 
 		// Wait for results
 		var queueStat, qtStat, fileStat, ftStat Statistics
@@ -372,6 +367,16 @@ func main() {
 			printTable("Queue Types", qtStat, true)
 			printTable("File Types", ftStat, true)
 		}
+
+		if publish != nil {
+			close(publish)
+		}
+
+		if *replay {
+			for i := 0; i < *threads; i++ {
+				<-completed
+			}
+		}
 	}
 
 }
@@ -392,7 +397,7 @@ type publisherStatus struct {
 	published map[string]int
 }
 
-func messageHandler(id int, url string, messages <-chan *RabbitMessage, completed chan publisherStatus, declareQueues bool) {
+func messageHandler(id int, url string, messages <-chan *RabbitMessage, completed chan publisherStatus, declareQueues bool, isExchange bool) {
 	conn := must(amqp.Dial(url)).(*amqp.Connection)
 	defer conn.Close()
 
@@ -403,6 +408,7 @@ func messageHandler(id int, url string, messages <-chan *RabbitMessage, complete
 		returned := ch.NotifyReturn(make(chan amqp.Return, 1))
 		for r := range returned {
 			errPrintln(color.RedString("Returned message"), r.RoutingKey)
+			errPrintln(color.RedString("Error"), r.ReplyText)
 		}
 	}()
 
@@ -429,8 +435,11 @@ func messageHandler(id int, url string, messages <-chan *RabbitMessage, complete
 				"cmf": fmt.Sprintf("{url:%s,method:Process,zip:true}", msg.Queue),
 			}
 		}
-
-		must(ch.Publish("", msg.Queue, true, false, pub))
+		if isExchange {
+			must(ch.Publish(msg.Queue, "", true, false, pub))
+		} else {
+			must(ch.Publish("", msg.Queue, true, false, pub))
+		}
 		published[msg.Queue]++
 	}
 }
