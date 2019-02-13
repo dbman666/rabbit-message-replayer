@@ -1,5 +1,5 @@
-hash: 1a183c552e96aade967e946ac534aeabc779d4b0d1c32cbff7df7e27d368d48b
-updated: 2019-01-10T11:25:36.114909-05:00
+hash: 222ca297dcf3bfbdbb1ffd7e2ba0a903719053466b2ec5979d9a1e4132104f81
+updated: 2019-01-25T14:53:09.318828552-05:00
 imports:
 - name: github.com/alecthomas/template
   version: a0175ee3bccc567396460bf5acd36800cb10c49c
@@ -10,7 +10,7 @@ imports:
 - name: github.com/aokoli/goutils
   version: 41ac8693c5c10a92ea1ff5ac3a7f95646f6123b0
 - name: github.com/coveo/gotemplate
-  version: 1213ee7e12b804043ac7e571713037aca4d38e72
+  version: fddad3f3f6e08434f3726696bc8116393af6fea0
   subpackages:
   - collections
   - collections/implementation
@@ -54,6 +54,8 @@ imports:
   version: 703b5e6b11ae25aeb2af9ebb5d5fdf8fa2575211
 - name: github.com/olekukonko/tablewriter
   version: e6d60cf7ba1f42d86d54cdf5508611c4aafb3970
+- name: github.com/streadway/amqp
+  version: a314942b2fd9dde7a3f70ba3f1062848ce6eb392
 - name: golang.org/x/crypto
   version: ff983b9c42bc9fbf91556e191cc8efb585c16908
   subpackages:

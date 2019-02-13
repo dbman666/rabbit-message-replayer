@@ -1,7 +1,7 @@
 package: .
 import:
 - package: github.com/coveo/gotemplate
-  version: 1213ee7e12b804043ac7e571713037aca4d38e72
+  version: fddad3f3f6e08434f3726696bc8116393af6fea0
   subpackages:
   - collections
   - errors
