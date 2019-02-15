@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/coveo/gotemplate/collections"
 	"github.com/coveo/gotemplate/errors"
@@ -65,6 +67,9 @@ func main() {
 
 	var (
 		app              = kingpin.New(os.Args[0], description)
+		getVersion       = app.Flag("version", "Get the current version of gotemplate.").Short('v').Bool()
+		forceColor       = app.Flag("color", "Force rendering of colors event if output is redirected.").Bool()
+		forceNoColor     = app.Flag("no-color", "Force rendering of colors event if output is redirected.").Bool()
 		folder           = app.Flag("folder", "Folder where to find messages.").Short('f').ExistingDir()
 		rabbitURL        = app.Flag("rabbit-host", "The RabbitMQ Url. Env="+rabbitHost).Short('H').Envar(rabbitHost).String()
 		rabbitPrototocol = app.Flag("protocol", "The RabbitMQ protocol.").Default("amqp").String()
@@ -73,36 +78,71 @@ func main() {
 		password         = app.Flag("password", "Password used to connect to RabbitMQ. Env="+rabbitPassword).Default("guest").Envar(rabbitPassword).String()
 		declareQueue     = app.Flag("declare-queues", "Force queue creation if it does not exist").Bool()
 		isExchange       = app.Flag("is-exchange", "Set to true if the queue names are actually exchanges").Bool()
+		match            = app.Flag("match", "Regular expression for matching queues").Short('m').PlaceHolder("regexp").String()
+		maxDepth         = app.Flag("max-depth", "Maximum depth to find.").Default("5").Int()
+		outputFolder     = app.Flag("output-folder", "Where queue data should be exported").String()
+		threads          = app.Flag("threads", "Number of parallel threads running.").Short('t').Default(fmt.Sprint((runtime.NumCPU() + 1) / 2)).Int()
+		verbose          = app.Flag("verbose", "Indicate to add traces during processing").Short('V').Bool()
+		patterns         = app.Flag("pattern", "Pattern used to find persistent store or index files.").Short('p').Default("*.rdq", "*.idx").Strings()
 
 		findLostCommand = app.Command("find-lost", "Finds lost messages given a list of queues and how many messages they have lost")
-		lostMessages    = findLostCommand.Flag("lost-messages", "Map of lost messages by queue").Required().PlaceHolder("JSONFile").ExistingFile()
-		outputFolder    = findLostCommand.Flag("output-folder", "Where queue data should be exported").Required().PlaceHolder("folder").String()
+		lostMessages    = findLostCommand.Flag("lost-messages", "Map of lost messages by queue").Required().ExistingFile()
+
+		splitCommand = app.Command("split-messages", "Finds lost messages given a list of queues and how many messages they have lost")
 
 		replayCommand = app.Command("replay", "Replay messages that have been extracted by find-lost command")
 
-		fullCommand  = app.Command("full", "Parse all files recursively in the source folder to find messages")
-		forceColor   = fullCommand.Flag("color", "Force rendering of colors event if output is redirected.").Bool()
-		forceNoColor = fullCommand.Flag("no-color", "Force rendering of colors event if output is redirected.").Bool()
-		verbose      = fullCommand.Flag("verbose", "Indicate to add traces during processing").Short('V').Bool()
-		getVersion   = fullCommand.Flag("version", "Get the current version of gotemplate.").Short('v').Bool()
-		replay       = fullCommand.Flag("replay", "Actually replay the messages to the target Rabbit cluster.").Short('r').Bool()
-		maxDepth     = fullCommand.Flag("max-depth", "Maximum depth to find.").Default("5").Int()
-		patterns     = fullCommand.Flag("pattern", "Pattern used to find persistent store or index files.").Short('p').Default("*.rdq", "*.idx").Strings()
-		threads      = fullCommand.Flag("threads", "Number of parallel threads running.").Short('t').Default(fmt.Sprint((runtime.NumCPU() + 1) / 2)).Int()
-		output       = fullCommand.Flag("output", "Specify the output type (Json, Yaml, Hcl)").Short('o').Enum("Hcl", "h", "hcl", "H", "HCL", "Json", "j", "json", "J", "JSON", "Yaml", "Yml", "y", "yml", "yaml", "Y", "YML", "YAML")
-		match        = fullCommand.Flag("match", "Regular expression for matching queues").Short('m').PlaceHolder("regexp").String()
+		fullCommand = app.Command("full", "Parse all files recursively in the source folder to find messages")
+		replay      = fullCommand.Flag("replay", "Actually replay the messages to the target Rabbit cluster.").Short('r').Bool()
+		output      = fullCommand.Flag("output", "Specify the output type (Json, Yaml, Hcl)").Short('o').Enum("Hcl", "h", "hcl", "H", "HCL", "Json", "j", "json", "J", "JSON", "Yaml", "Yml", "y", "yml", "yaml", "Y", "YML", "YAML")
 	)
 
 	app.UsageWriter(os.Stdout)
 	kingpin.CommandLine = app
 	kingpin.CommandLine.HelpFlag.Short('h')
-	switch kingpin.Parse() {
-	case findLostCommand.FullCommand():
+	command := kingpin.Parse()
 
+	if *getVersion {
+		println(version)
+		os.Exit(0)
+	}
+
+	if *forceNoColor {
+		color.NoColor = true
+	} else if *forceColor {
+		color.NoColor = false
+	}
+
+	if *threads == 0 {
+		*threads = runtime.NumCPU() / 2
+	}
+
+	var re *regexp.Regexp
+	if *match != "" {
+		re = regexp.MustCompile(*match)
+	}
+
+	var patternList []string
+	for _, p := range *patterns {
+		patternList = append(patternList, strings.Split(p, ";")...)
+	}
+
+	var files []string
+	if command == findLostCommand.FullCommand() || command == splitCommand.FullCommand() {
+		if *outputFolder == "" {
+			panic("You need to specify an output folder")
+		}
 		// Get files in reverse order
-		fmt.Println("Finding files")
-		files := utils.MustFindFilesMaxDepth(*folder, 1, false, "*.rdq")
-		fmt.Printf("Found %v files. Sorting files\n", len(files))
+		errPrintln(color.GreenString("Finding files"))
+		files = utils.MustFindFilesMaxDepth(*folder, *maxDepth, false, patternList...)
+		errPrintf(color.GreenString("Found %v files. Sorting files\n"), len(files))
+
+		// Create output folder
+		os.MkdirAll(*outputFolder, os.ModePerm)
+	}
+
+	switch command {
+	case findLostCommand.FullCommand():
 		fileNumbers := []int{}
 		for _, file := range files {
 			fileNumbers = append(fileNumbers, must(strconv.Atoi(strings.Split(path.Base(file), ".")[0])).(int))
@@ -111,9 +151,6 @@ func main() {
 		for i, fileNumber := range fileNumbers {
 			files[i] = path.Join(*folder, fmt.Sprintf("%v.rdq", fileNumber))
 		}
-
-		// Create output folder
-		os.MkdirAll(*outputFolder, os.ModePerm)
 
 		// Parse configuration file and create output files (faster to create them all here and delete unneeded ones than check if they are created at runtime)
 		var lostMessagesData []interface{}
@@ -155,7 +192,7 @@ func main() {
 			if !stillNeedToProcess {
 				break
 			}
-			fmt.Println("Handling file: " + file)
+			errPrintln(color.GreenString("Handling file: " + file))
 			filesHandled++
 
 			data := must(ReadRabbitFile(file, nil)).(RabbitFile)
@@ -169,7 +206,7 @@ func main() {
 				}
 			})
 		}
-		fmt.Println("Completed!")
+		errPrintln(color.GreenString("Completed!"))
 
 		keys := []string{}
 		for queueName := range lostMessagesMap {
@@ -198,6 +235,75 @@ func main() {
 		table.SetFooter(data.Strings())
 		table.Render()
 		fmt.Println()
+
+	case splitCommand.FullCommand():
+		type WriteData struct {
+			file  string
+			value string
+		}
+
+		numThreads := int(math.Min(float64(len(files)), float64(*threads)))
+		errPrintln(color.GreenString("Reading with %v threads!\n", numThreads))
+
+		filesToHandle := make(chan string, numThreads)
+		toWrite := make(chan WriteData)
+		doneReading := make(chan bool, numThreads)
+		doneWriting := make(chan bool, 1)
+		var count int32
+
+		for i := 0; i < numThreads; i++ {
+			go func() {
+				for {
+					file, more := <-filesToHandle
+					if more {
+						atomic.AddInt32(&count, 1)
+						errPrintln(color.GreenString(" - Reading file " + file))
+						data := must(ReadRabbitFile(file, nil)).(RabbitFile)
+						data.ProcessMessages(func(msg *RabbitMessage) {
+							if re == nil || re.MatchString(msg.Queue) {
+								toWrite <- WriteData{file: msg.Queue, value: fmt.Sprintln(base64.StdEncoding.EncodeToString(msg.Data))}
+							}
+						})
+					} else {
+						doneReading <- true
+						return
+					}
+				}
+			}()
+		}
+
+		fileHandlers := make(map[string]*os.File)
+		go func() {
+			for {
+				writeData, more := <-toWrite
+				if more {
+					path := path.Join(*outputFolder, writeData.file)
+					fileHandle := fileHandlers[path]
+					if fileHandle == nil {
+						fileHandle = must(os.Create(path)).(*os.File)
+						fileHandlers[path] = fileHandle
+					}
+					fileHandle.WriteString(writeData.value)
+				} else {
+					doneWriting <- true
+					return
+				}
+			}
+		}()
+
+		for _, file := range files {
+			filesToHandle <- file
+		}
+		close(filesToHandle)
+
+		for i := 0; i < numThreads; i++ {
+			<-doneReading
+		}
+		errPrintln(color.GreenString("Read %v files!\n", atomic.LoadInt32(&count)))
+		close(toWrite)
+
+		<-doneWriting
+		errPrintln(color.GreenString("Done writing!"))
 
 	case replayCommand.FullCommand():
 		url := fmt.Sprintf("%s://%s:%s@%s:%d", *rabbitPrototocol, *user, *password, *rabbitURL, *rabbitPort)
@@ -236,29 +342,6 @@ func main() {
 		fmt.Println()
 
 	case fullCommand.FullCommand():
-		var patternList []string
-		for _, p := range *patterns {
-			patternList = append(patternList, strings.Split(p, ";")...)
-		}
-
-		if *threads == 0 {
-			*threads = runtime.NumCPU() / 2
-		}
-		if *forceNoColor {
-			color.NoColor = true
-		} else if *forceColor {
-			color.NoColor = false
-		}
-
-		if *getVersion {
-			println(version)
-			os.Exit(0)
-		}
-
-		var re *regexp.Regexp
-		if *match != "" {
-			re = regexp.MustCompile(*match)
-		}
 
 		files := utils.MustFindFilesMaxDepth(*folder, *maxDepth, false, patternList...)
 		files = collections.AsList(files).Unique().Strings()
