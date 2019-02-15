@@ -77,6 +77,7 @@ func (rb *RabbitBlob) ProcessMessages(handler func(*RabbitMessage)) {
 		}
 
 		msg.Queue = must(msg.GetQueueName(rb.data)).(string)
+		msg.Method = msg.GetMethod(rb.data)
 
 		if handler != nil {
 			handler(&msg)

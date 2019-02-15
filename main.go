@@ -515,7 +515,7 @@ func messageHandler(id int, url string, messages <-chan *RabbitMessage, complete
 
 		if msg.IsPush() {
 			pub.Headers = map[string]interface{}{
-				"cmf": fmt.Sprintf("{url:%s,method:Process,zip:true}", msg.Queue),
+				"cmf": fmt.Sprintf("{url:%s,method:%s,zip:true}", msg.Queue, msg.Method),
 			}
 		}
 		if isExchange {
