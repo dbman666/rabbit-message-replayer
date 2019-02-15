@@ -67,7 +67,7 @@ func main() {
 
 	var (
 		app              = kingpin.New(os.Args[0], description)
-		getVersion       = app.Flag("version", "Get the current version of gotemplate.").Short('v').Bool()
+		getVersion       = app.Flag("version", "Get the current version of the replayer").Short('v').Bool()
 		forceColor       = app.Flag("color", "Force rendering of colors event if output is redirected.").Bool()
 		forceNoColor     = app.Flag("no-color", "Force rendering of colors event if output is redirected.").Bool()
 		folder           = app.Flag("folder", "Folder where to find messages.").Short('f').ExistingDir()
