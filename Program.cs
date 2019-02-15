@@ -87,13 +87,15 @@ namespace rabbit
                         foreach (var msg in ExtractFromFile(fileAsBytes, isRdqFile)) {
                             globalStats.AddMsg(msg);
 
+                            Console.WriteLine($"{msg.PosLen}: {msg.MsgLen}: {msg.Method}: {msg.Queue} push:{msg.IsPush}");
+
                             if (!hasApply)
                                 continue;
 
                             if (onlyPush && !msg.IsPush)
                                 continue;
 
-                            Console.WriteLine($"{msg.PosLen}: {msg.MsgLen}: {msg.Queue} push:{msg.IsPush}");
+                            Console.WriteLine($"{msg.PosLen}: {msg.MsgLen}: {msg.Method}: {msg.Queue} push:{msg.IsPush}");
 
                             if (outputEveryMessage)
                                 File.WriteAllBytes($@"c:\temp\for-Yanick-{iMsg}.bin", msg.Bytes);
@@ -104,7 +106,7 @@ namespace rabbit
                                 props = channel.CreateBasicProperties();
                                 propsPersistent.DeliveryMode = 2;
                                 props.Headers = new Dictionary<string, object>();
-                                props.Headers.Add("cmf", $"{{url:{msg.Queue},method:Process,zip:true}}");
+                                props.Headers.Add("cmf", $"{{url:{msg.Queue},method:{msg.Method},zip:true}}");
                             }
                             channel.BasicPublish("", useCommoneQueue ? commonQueue : msg.Queue, false, props, msg.Bytes);
                         }
@@ -158,7 +160,7 @@ namespace rabbit
         {
             Console.WriteLine(
 @"rabbit [--replay] [--onlypush] [<wildcard>]
---replay is the safeguard to NOT replay automatically. It not specified, only stats are output.
+--replay is the safeguard to NOT replay automatically. If not specified, only stats are output.
 <wildcard> must contain the extension. Ex: *.rdq
 
 Expected env vars:
@@ -185,6 +187,7 @@ Expected env vars:
             var fileAsHexChars = BitConverter.ToString(fileAsBytes);
             var posLen = 0L;
             var msgLen = 0L;
+
 
             while (posLen < fileAsBytes.Length) {
                 if (p_UseMsgLen) {
@@ -222,8 +225,11 @@ Expected env vars:
                     msg.Queue = ExtractQueueName(fileAsBytes, fileAsHexChars, msgPos);
                 } else {
                     msg.IsPush = true;
-                    msg.Queue = ExtractPushQueueName(fileAsBytes, msgPos / nbCharsInHex);
+                    msg.Queue = ExtractPushQueueName(fileAsBytes, msgPos / nbCharsInHex, out msg.Method);
                 }
+
+                if (msg.Method != "Process")
+                    Console.WriteLine($"Method: {msg.Method}");
 
                 yield return msg;
 
@@ -258,7 +264,7 @@ Expected env vars:
             return Encoding.ASCII.GetString(fileAsBytes, posStart / nbCharsInHex, len);
         }
 
-        static string ExtractPushQueueName(byte[] fileAsBytes, int startPos)
+        static string ExtractPushQueueName(byte[] fileAsBytes, int startPos, out string methodName)
         {
             // {url:ces.gmproductione2yq29g7-koflgbm4.Dpm.Doc,method:Process,zip:true}....rabbit_framing_amqp_0_9_1
             // startPos is pointing on 'rabbit_...'
@@ -274,13 +280,22 @@ Expected env vars:
             var posCloseBrace = posOpenBrace;
             while (fileAsBytes[++posCloseBrace] != ',') {
             }
-            return Encoding.ASCII.GetString(fileAsBytes, posOpenBrace, posCloseBrace - posOpenBrace);
+            var url = Encoding.ASCII.GetString(fileAsBytes, posOpenBrace, posCloseBrace - posOpenBrace);
+            posOpenBrace = ++posCloseBrace;
+            if (fileAsBytes[posOpenBrace] != 'm') throw new Exception("Expected 'method:'");
+            posOpenBrace += 7;
+            posCloseBrace = posOpenBrace;
+            while (fileAsBytes[++posCloseBrace] != ',' && fileAsBytes[posCloseBrace] != '}') {
+            }
+            methodName = Encoding.ASCII.GetString(fileAsBytes, posOpenBrace, posCloseBrace - posOpenBrace);
+            return url;
         }
     }
 
     public class Msg
     {
         public string Queue;
+        public string Method = "Process";
         public byte[] Bytes;
         public bool IsPush;
         public long PosLen;
