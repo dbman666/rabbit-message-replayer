@@ -5,9 +5,14 @@ import (
 	"fmt"
 )
 
+const (
+	defaultMethod = "Process"
+)
+
 // RabbitMessage represents a message that must be stored into RabbitMQ
 type RabbitMessage struct {
 	Queue            string
+	Method           string
 	Data             []byte
 	Length, Position int
 }
@@ -29,4 +34,20 @@ func (msg *RabbitMessage) GetQueueName(data []byte) (string, error) {
 		return string(blob.ReadBytes(int(len))), nil
 	}
 	return "", fmt.Errorf("Unable to find queuename at position %d", msg.Position)
+}
+
+// GetMethod retrieve the method that should be used, defaults to "Process"
+func (msg *RabbitMessage) GetMethod(data []byte) string {
+	if !msg.IsPush() {
+		return defaultMethod
+	}
+
+	blob := RabbitBlob{data: data[msg.Position:]}
+	if blob.pos = bytes.Index(blob.data, []byte("method:")); blob.pos >= 0 {
+		blob.pos += 7
+		if len := bytes.Index(blob.data[blob.pos:], []byte(",")); len != -1 {
+			return string(blob.ReadBytes(len))
+		}
+	}
+	return defaultMethod
 }
