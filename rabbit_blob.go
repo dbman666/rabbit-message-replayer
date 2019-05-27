@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/coveo/gotemplate/errors"
+	"github.com/coveo/gotemplate/v3/errors"
 )
 
 const (

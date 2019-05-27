@@ -18,16 +18,16 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/coveo/gotemplate/collections"
-	"github.com/coveo/gotemplate/errors"
-	"github.com/coveo/gotemplate/hcl"
-	"github.com/coveo/gotemplate/json"
-	"github.com/coveo/gotemplate/utils"
-	"github.com/coveo/gotemplate/yaml"
+	"github.com/coveo/gotemplate/v3/collections"
+	"github.com/coveo/gotemplate/v3/errors"
+	"github.com/coveo/gotemplate/v3/hcl"
+	"github.com/coveo/gotemplate/v3/json"
+	"github.com/coveo/gotemplate/v3/utils"
+	"github.com/coveo/gotemplate/v3/yaml"
+	"github.com/coveo/kingpin/v2"
 	"github.com/fatih/color"
 	"github.com/olekukonko/tablewriter"
 	"github.com/streadway/amqp"
-	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 // Version is initialized at build time through -ldflags "-X main.Version=<version number>"
@@ -66,16 +66,16 @@ func main() {
 	}()
 
 	var (
-		app              = kingpin.New(os.Args[0], description)
+		app              = kingpin.New(os.Args[0], description).AutoShortcut()
 		getVersion       = app.Flag("version", "Get the current version of the replayer").Short('v').Bool()
-		forceColor       = app.Flag("color", "Force rendering of colors event if output is redirected.").Bool()
-		forceNoColor     = app.Flag("no-color", "Force rendering of colors event if output is redirected.").Bool()
+		colorModeIsSet   bool
+		colorMode        = app.Flag("color", "Force rendering of colors event if output is redirected.").IsSetByUser(&colorModeIsSet).Bool()
 		folder           = app.Flag("folder", "Folder where to find messages.").Short('f').ExistingDir()
 		rabbitURL        = app.Flag("rabbit-host", "The RabbitMQ Url. Env="+rabbitHost).Short('H').Envar(rabbitHost).String()
 		rabbitPrototocol = app.Flag("protocol", "The RabbitMQ protocol.").Default("amqp").String()
-		rabbitPort       = app.Flag("port", "The RabbitMQ port.").Default("5672").Int()
+		rabbitPort       = app.Flag("port", "The RabbitMQ port.").Default("5672").NoAutoShortcut().Int()
 		user             = app.Flag("user", "User used to connect to RabbitMQ. Env="+rabbitUser).Short('u').Default("guest").Envar(rabbitUser).String()
-		password         = app.Flag("password", "Password used to connect to RabbitMQ. Env="+rabbitPassword).Default("guest").Envar(rabbitPassword).String()
+		password         = app.Flag("password", "Password used to connect to RabbitMQ. Env="+rabbitPassword).Default("guest").NoAutoShortcut().Envar(rabbitPassword).String()
 		declareQueue     = app.Flag("declare-queues", "Force queue creation if it does not exist").Bool()
 		isExchange       = app.Flag("is-exchange", "Set to true if the queue names are actually exchanges").Bool()
 		match            = app.Flag("match", "Regular expression for matching queues").Short('m').PlaceHolder("regexp").String()
@@ -87,6 +87,7 @@ func main() {
 
 		findLostCommand = app.Command("find-lost", "Finds lost messages given a list of queues and how many messages they have lost")
 		lostMessages    = findLostCommand.Flag("lost-messages", "Map of lost messages by queue").Required().ExistingFile()
+		start           = findLostCommand.Flag("starts-with", "File number to start with").Int()
 
 		splitCommand = app.Command("split-messages", "Finds lost messages given a list of queues and how many messages they have lost")
 
@@ -107,10 +108,8 @@ func main() {
 		os.Exit(0)
 	}
 
-	if *forceNoColor {
-		color.NoColor = true
-	} else if *forceColor {
-		color.NoColor = false
+	if colorModeIsSet {
+		color.NoColor = *colorMode
 	}
 
 	if *threads == 0 {
@@ -149,6 +148,10 @@ func main() {
 		}
 		sort.Sort(sort.Reverse(sort.IntSlice(fileNumbers)))
 		for i, fileNumber := range fileNumbers {
+			if *start > 0 && fileNumber > *start {
+				files[i] = ""
+				continue
+			}
 			files[i] = path.Join(*folder, fmt.Sprintf("%v.rdq", fileNumber))
 		}
 
@@ -180,6 +183,9 @@ func main() {
 		filesHandled := 0
 		// Find messages and write them to the file
 		for _, file := range files {
+			if file == "" {
+				continue
+			}
 			stillNeedToProcess := false
 			for queueName, queueInfo := range lostMessagesMap {
 				if queueInfo.found < queueInfo.toFind {
@@ -195,7 +201,11 @@ func main() {
 			errPrintln(color.GreenString("Handling file: " + file))
 			filesHandled++
 
-			data := must(ReadRabbitFile(file, nil)).(RabbitFile)
+			data, err := ReadRabbitFile(file, nil)
+			if err != nil {
+				errPrintln(color.RedString(err.Error()))
+				continue
+			}
 			data.ProcessMessages(func(msg *RabbitMessage) {
 				if queueInfo, ok := lostMessagesMap[msg.Queue]; ok && !queueInfo.done {
 					if msg.IsPush() {

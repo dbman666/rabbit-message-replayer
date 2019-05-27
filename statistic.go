@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/coveo/gotemplate/collections"
+	"github.com/coveo/gotemplate/v3/collections"
 )
 
 // Statistic retains statistics regarding an object category
