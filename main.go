@@ -18,13 +18,13 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/coveo/gotemplate/v3/collections"
-	"github.com/coveo/gotemplate/v3/errors"
-	"github.com/coveo/gotemplate/v3/hcl"
-	"github.com/coveo/gotemplate/v3/json"
-	"github.com/coveo/gotemplate/v3/utils"
-	"github.com/coveo/gotemplate/v3/yaml"
-	"github.com/coveo/kingpin/v2"
+	"github.com/coveooss/gotemplate/v3/collections"
+	"github.com/coveooss/gotemplate/v3/hcl"
+	"github.com/coveooss/gotemplate/v3/json"
+	"github.com/coveooss/gotemplate/v3/utils"
+	"github.com/coveooss/gotemplate/v3/yaml"
+	"github.com/coveooss/multilogger/errors"
+	"github.com/coveord/kingpin/v2"
 	"github.com/fatih/color"
 	"github.com/olekukonko/tablewriter"
 	"github.com/streadway/amqp"
@@ -77,7 +77,6 @@ func main() {
 		user             = app.Flag("user", "User used to connect to RabbitMQ. Env="+rabbitUser).Short('u').Default("guest").Envar(rabbitUser).String()
 		password         = app.Flag("password", "Password used to connect to RabbitMQ. Env="+rabbitPassword).Default("guest").NoAutoShortcut().Envar(rabbitPassword).String()
 		declareQueue     = app.Flag("declare-queues", "Force queue creation if it does not exist").Bool()
-		isExchange       = app.Flag("is-exchange", "Set to true if the queue names are actually exchanges").Bool()
 		match            = app.Flag("match", "Regular expression for matching queues").Short('m').PlaceHolder("regexp").String()
 		maxDepth         = app.Flag("max-depth", "Maximum depth to find.").Default("5").Int()
 		outputFolder     = app.Flag("output-folder", "Where queue data should be exported").String()
@@ -129,7 +128,8 @@ func main() {
 	var files []string
 	if command == findLostCommand.FullCommand() || command == splitCommand.FullCommand() {
 		if *outputFolder == "" {
-			panic("You need to specify an output folder")
+			errPrintln("You need to specify an output folder")
+			os.Exit(1)
 		}
 		// Get files in reverse order
 		errPrintln(color.GreenString("Finding files"))
@@ -142,17 +142,28 @@ func main() {
 
 	switch command {
 	case findLostCommand.FullCommand():
-		fileNumbers := []int{}
+		sort.Slice(files, func(i, j int) bool {
+			if path.Dir(files[i]) == path.Dir(files[j]) {
+				iNum := must(strconv.Atoi(strings.Split(path.Base(files[i]), ".")[0])).(int)
+				jNum := must(strconv.Atoi(strings.Split(path.Base(files[j]), ".")[0])).(int)
+				return iNum > jNum
+			}
+			return path.Dir(files[i]) > path.Dir(files[j])
+		})
+		fileNumbers := make([]int, 0, len(files))
 		for _, file := range files {
 			fileNumbers = append(fileNumbers, must(strconv.Atoi(strings.Split(path.Base(file), ".")[0])).(int))
 		}
 		sort.Sort(sort.Reverse(sort.IntSlice(fileNumbers)))
-		for i, fileNumber := range fileNumbers {
-			if *start > 0 && fileNumber > *start {
-				files[i] = ""
-				continue
+		if *start > 0 {
+			newFiles := make([]string, 0, len(files))
+			for _, file := range files {
+				num := must(strconv.Atoi(strings.Split(path.Base(file), ".")[0])).(int)
+				if num <= *start {
+					newFiles = append(newFiles, file)
+				}
 			}
-			files[i] = path.Join(*folder, fmt.Sprintf("%v.rdq", fileNumber))
+			files = newFiles
 		}
 
 		// Parse configuration file and create output files (faster to create them all here and delete unneeded ones than check if they are created at runtime)
@@ -163,8 +174,10 @@ func main() {
 			found       int
 			pushAPI     int
 			done        bool
+			exchange    string
 			filePath    string
 			fileHandler *os.File
+			queues      []string
 		}
 
 		lostMessagesMap := make(map[string]*FindData)
@@ -178,21 +191,31 @@ func main() {
 				filePath:    filePath,
 				fileHandler: must(os.Create(filePath)).(*os.File),
 			}
+
+			if exchange, _ := itemAsMap["exchange"].(string); exchange != "" {
+				if exchangeRecord := lostMessagesMap[exchange]; exchangeRecord == nil {
+					filePath := path.Join(*outputFolder, exchange)
+					lostMessagesMap[exchange] = &FindData{
+						filePath:    filePath,
+						fileHandler: must(os.Create(filePath)).(*os.File),
+						queues:      []string{queueName},
+					}
+				} else {
+					exchangeRecord.queues = append(exchangeRecord.queues, queueName)
+				}
+			}
 		}
 
 		filesHandled := 0
 		// Find messages and write them to the file
 		for _, file := range files {
-			if file == "" {
-				continue
-			}
 			stillNeedToProcess := false
 			for queueName, queueInfo := range lostMessagesMap {
 				if queueInfo.found < queueInfo.toFind {
 					stillNeedToProcess = true
-				} else if !queueInfo.done {
+				} else if !queueInfo.done && queueInfo.toFind > 0 {
 					queueInfo.done = true
-					fmt.Printf(color.GreenString("All messages in %s have been found\n"), queueName)
+					fmt.Println(color.GreenString("All %d messages in %s have been found", queueInfo.toFind, queueName))
 				}
 			}
 			if !stillNeedToProcess {
@@ -213,6 +236,9 @@ func main() {
 					}
 					queueInfo.fileHandler.WriteString(fmt.Sprintln(base64.StdEncoding.EncodeToString(msg.Data)))
 					queueInfo.found++
+					for _, queue := range queueInfo.queues {
+						lostMessagesMap[queue].found++
+					}
 				}
 			})
 		}
@@ -319,7 +345,7 @@ func main() {
 		url := fmt.Sprintf("%s://%s:%s@%s:%d", *rabbitPrototocol, *user, *password, *rabbitURL, *rabbitPort)
 		publish := make(chan *RabbitMessage)
 		completed := make(chan publisherStatus)
-		go messageHandler(0, url, publish, completed, *declareQueue, *isExchange)
+		go messageHandler(0, url, publish, completed, *declareQueue)
 		files := utils.MustFindFilesMaxDepth(*folder, 1, false, "*")
 		for _, fileName := range files {
 			fmt.Println("Processing file", fileName)
@@ -352,7 +378,6 @@ func main() {
 		fmt.Println()
 
 	case fullCommand.FullCommand():
-
 		files := utils.MustFindFilesMaxDepth(*folder, *maxDepth, false, patternList...)
 		files = collections.AsList(files).Unique().Strings()
 		if *verbose {
@@ -373,7 +398,7 @@ func main() {
 			go fileHandler(i, jobs, results, re)
 
 			if *replay {
-				go messageHandler(i, url, publish, completed, *declareQueue, *isExchange)
+				go messageHandler(i, url, publish, completed, *declareQueue)
 			}
 		}
 
@@ -388,7 +413,7 @@ func main() {
 		for range files {
 			file := <-results
 			if *verbose {
-				errPrintf("%s %d messages %d bytes\n", file.Name(), file.Count(), file.Size())
+				errPrintf("%s %d messages %.0f bytes\n", file.Name(), file.Count(), file.Size())
 			}
 
 			queueStat.Join(file.Queues)
@@ -410,14 +435,14 @@ func main() {
 		if mode := *output; mode != "" {
 			switch strings.ToUpper(mode[:1]) {
 			case "Y":
-				collections.ListHelper = yaml.GenericListHelper
-				collections.DictionaryHelper = yaml.DictionaryHelper
+				collections.SetListHelper(yaml.GenericListHelper)
+				collections.SetDictionaryHelper(yaml.DictionaryHelper)
 			case "H":
-				collections.ListHelper = hcl.GenericListHelper
-				collections.DictionaryHelper = hcl.DictionaryHelper
+				collections.SetListHelper(hcl.GenericListHelper)
+				collections.SetDictionaryHelper(hcl.DictionaryHelper)
 			default:
-				collections.ListHelper = json.GenericListHelper
-				collections.DictionaryHelper = json.DictionaryHelper
+				collections.SetListHelper(json.GenericListHelper)
+				collections.SetDictionaryHelper(json.DictionaryHelper)
 			}
 			print(collections.AsList(map[string]interface{}{
 				"Files":      fileStat.GetStats(),
@@ -490,7 +515,7 @@ type publisherStatus struct {
 	published map[string]int
 }
 
-func messageHandler(id int, url string, messages <-chan *RabbitMessage, completed chan publisherStatus, declareQueues bool, isExchange bool) {
+func messageHandler(id int, url string, messages <-chan *RabbitMessage, completed chan publisherStatus, declareQueues bool) {
 	conn := must(amqp.Dial(url)).(*amqp.Connection)
 	defer conn.Close()
 
@@ -528,7 +553,8 @@ func messageHandler(id int, url string, messages <-chan *RabbitMessage, complete
 				"cmf": fmt.Sprintf("{url:%s,method:%s,zip:true}", msg.Queue, msg.Method),
 			}
 		}
-		if isExchange {
+
+		if strings.HasSuffix(msg.Queue, "Index.Doc") || strings.HasSuffix(msg.Queue, "SecCluster.Sync") {
 			must(ch.Publish(msg.Queue, "", true, false, pub))
 		} else {
 			must(ch.Publish("", msg.Queue, true, false, pub))

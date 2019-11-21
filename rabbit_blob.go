@@ -5,7 +5,8 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/coveo/gotemplate/v3/errors"
+	"github.com/coveooss/multilogger/errors"
+	"github.com/fatih/color"
 )
 
 const (
@@ -42,7 +43,14 @@ func (rb *RabbitBlob) ProcessMessages(handler func(*RabbitMessage)) {
 				data: rb.ReadBytes(msg.Length),
 				name: rb.name,
 			}
-			rb.AssertByte(0xff)
+			func() {
+				defer func() {
+					if err := recover(); err != nil {
+						errPrintln(color.RedString("Oh no! %v", err))
+					}
+				}()
+				rb.AssertByte(0xff)
+			}()
 		} else {
 			blob = rb
 		}

@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/coveo/gotemplate/v3/errors"
+	"github.com/coveooss/multilogger/errors"
 )
 
 // ReadRabbitFile load a RabbitMQ index or persistent store file in RAM
